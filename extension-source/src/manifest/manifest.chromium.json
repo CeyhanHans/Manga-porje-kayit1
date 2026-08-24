@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Manga Türkçe Overlay (Demo)",
+  "version": "0.5.3",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';"
+  },
+  "description": "Yerel OCR ve DeepL ile İngilizce manga metinlerini Türkçe overlay olarak gösterir.",
+  "action": { "default_popup": "popup.html" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": ["activeTab", "scripting", "storage", "declarativeNetRequest", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [{ "matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_idle" }],
+  "web_accessible_resources": [{ "resources": ["ocr.js", "ocr-frame.js", "ocr-frame.html", "ocr-worker.min.js", "ocr-core/*", "ocr-lang/*"], "matches": ["<all_urls>"] }]
+}
+
