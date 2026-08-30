@@ -1,3 +1,30 @@
+/* AGENT_GOREV5_BAŞLANGIÇ */
+type OcrCacheEntry = { regions: any[]; timestamp: number };
+const MangaTrOcrCache = new Map<string, OcrCacheEntry>();
+const OCR_CACHE_TTL_MS = 5 * 60 * 1000; // 5 dakika
+const OCR_CACHE_MAX_SIZE = 50;
+
+function getCachedOcr(url: string): OcrCacheEntry['regions'] | null {
+  const entry = MangaTrOcrCache.get(url);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > OCR_CACHE_TTL_MS) {
+    MangaTrOcrCache.delete(url);
+    return null;
+  }
+  console.log('[MangaTR CACHE HIT]', url);
+  return entry.regions;
+}
+
+function setCachedOcr(url: string, regions: any[]): void {
+  if (url.startsWith('data:image/')) return; // data: URL'li görseller önbelleğe alınmaz
+  if (MangaTrOcrCache.size >= OCR_CACHE_MAX_SIZE) {
+    MangaTrOcrCache.delete(MangaTrOcrCache.keys().next().value as string);
+  }
+  MangaTrOcrCache.set(url, { regions, timestamp: Date.now() });
+}
+/* AGENT_GOREV5_BİTİŞ */
+
+/* AGENT_GOREV1_BAŞLANGIÇ */
 namespace MangaTrContent {
 declare const chrome: any;
 declare const browser: any;
@@ -20,8 +47,11 @@ const pendingOcr = new Map<string, { resolve: (boxes: OcrBox[]) => void; reject:
 const overlays = new Map<HTMLImageElement, OverlayState>();
 const ocrQueue: OverlayState[] = [];
 let queueRunning = false;
+let activeOcrCount = 0;
+const MAX_CONCURRENT_OCR = 3;
+let ocrObserver: IntersectionObserver | null = null;
 let captureScrollLock = false;
-const ocrCache = new Map<string, OcrBox[]>();
+/* AGENT_GOREV5_BAŞLANGIÇ: eski TTL'siz/sınırsız ocrCache kaldırıldı, global MangaTrOcrCache kullanılıyor */
 const translationCache = new Map<string, string>();
 
 document.documentElement.dataset.mangaTrReady = 'true';
@@ -34,8 +64,10 @@ function addStyle() {
   const style = document.createElement('style');
   style.id = STYLE_ID;
   style.textContent = `
-    #${ROOT_ID} { position:fixed; inset:0; z-index:2147483647; pointer-events:none; }
-    .manga-tr-region { position:fixed; display:flex; align-items:center; justify-content:center; box-sizing:border-box; padding:2px 4px; border:0; outline:0; border-radius:5px; background:rgba(255,255,255,.98) !important; color:#111; font-family:"Arial Narrow","Roboto Condensed",Arial,sans-serif; font-weight:700; letter-spacing:0; line-height:1.06; text-align:center; text-shadow:none; white-space:pre-wrap; overflow:hidden; }
+    /* AGENT_GOREV3_BAŞLANGIÇ */
+    #${ROOT_ID} { position:absolute; left:0; top:0; width:100%; min-height:100%; z-index:2147483647; pointer-events:none; }
+    .manga-tr-region { position:absolute; display:flex; align-items:center; justify-content:center; box-sizing:border-box; padding:4px; border:0; outline:0; border-radius:5px; background:rgba(255,255,255,.98) !important; color:#111; font-family:"Arial Narrow","Roboto Condensed",Arial,sans-serif; font-weight:700; letter-spacing:0; line-height:1.06; text-align:center; text-shadow:none; white-space:pre-wrap; word-break:break-word; overflow:hidden; }
+    /* AGENT_GOREV3_BİTİŞ */
     .manga-tr-close { position:fixed; pointer-events:auto; width:32px; height:32px; border:0; border-radius:16px; background:#211b3c; color:#fff; font-size:20px; cursor:pointer; box-shadow:0 2px 8px #0006; }
     .manga-tr-ocr-status { position:fixed; right:10px; bottom:10px; max-width:280px; padding:7px 10px; border-radius:7px; background:#211b3cdd; color:#fff; font:12px system-ui,sans-serif; }
   `;
@@ -273,15 +305,57 @@ async function recognizeImageLocally(image: HTMLImageElement): Promise<OcrBox[]>
   }
 }
 
+/* AGENT_2_BAŞLANGIÇ */
+function mergeAdjacentBoxes(boxes: OcrBox[]): OcrBox[] {
+  const sorted = [...boxes].sort((a, b) => a.top - b.top || a.left - b.left);
+  const merged: OcrBox[] = [];
+  for (const box of sorted) {
+    const prev = merged[merged.length - 1];
+    if (prev) {
+      const prevBottom = prev.top + prev.height;
+      const gap = box.top - prevBottom;
+      const prevLineHeight = prev.height / Math.max(1, prev.lineCount ?? 1);
+      const boxLineHeight = box.height / Math.max(1, box.lineCount ?? 1);
+      const lineHeight = Math.max(prevLineHeight, boxLineHeight);
+      const overlapLeft = Math.max(prev.left, box.left);
+      const overlapRight = Math.min(prev.left + prev.width, box.left + box.width);
+      const overlapWidth = overlapRight - overlapLeft;
+      const minOverlap = Math.min(prev.width, box.width) * 0.45;
+      if (gap >= -lineHeight * 0.4 && gap <= lineHeight * 1.6 && overlapWidth >= minOverlap) {
+        const left = Math.min(prev.left, box.left);
+        const top = Math.min(prev.top, box.top);
+        const right = Math.max(prev.left + prev.width, box.left + box.width);
+        const bottom = Math.max(prevBottom, box.top + box.height);
+        merged[merged.length - 1] = {
+          text: `${prev.text}\n${box.text}`,
+          confidence: Math.min(prev.confidence, box.confidence),
+          left,
+          top,
+          width: right - left,
+          height: bottom - top,
+          lineCount: (prev.lineCount ?? 1) + (box.lineCount ?? 1),
+        };
+        continue;
+      }
+    }
+    merged.push({ ...box });
+  }
+  return merged;
+}
+/* AGENT_2_BİTİŞ */
+
 async function translateBoxes(boxes: OcrBox[]): Promise<OcrBox[]> {
-  const missing = Array.from(new Set(boxes.map((box) => box.text.trim()).filter((text) => text && !translationCache.has(text))));
+  /* AGENT_2_BAŞLANGIÇ */
+  const sourceBoxes = mergeAdjacentBoxes(boxes);
+  /* AGENT_2_BİTİŞ */
+  const missing = Array.from(new Set(sourceBoxes.map((box) => box.text.trim()).filter((text) => text && !translationCache.has(text))));
   if (missing.length) {
     const response = await api.runtime.sendMessage({ type: 'TRANSLATE_TEXTS', texts: missing });
     if (response?.error) throw new Error(response.error);
     if (!Array.isArray(response?.translations) || response.translations.length !== missing.length) throw new Error('DeepL geçerli bir çeviri listesi döndürmedi.');
     missing.forEach((source, index) => translationCache.set(source, String(response.translations[index]).trim()));
   }
-  return boxes.map((box) => ({ ...box, text: translationCache.get(box.text.trim()) ?? '' })).filter((box) => box.text);
+  return sourceBoxes.map((box) => ({ ...box, text: translationCache.get(box.text.trim()) ?? '' })).filter((box) => box.text);
 }
 
 function renderState(state: OverlayState) {
@@ -292,18 +366,29 @@ function renderState(state: OverlayState) {
   if (!visible) return;
   const measure = document.createElement('canvas').getContext('2d');
   const fitText = (text: string, width: number, height: number, initialSize: number) => {
-    const words = text.trim().split(/\s+/).filter(Boolean);
+    /* AGENT_2_BAŞLANGIÇ */
+    const segments = text.split('\n').map((segment) => segment.trim()).filter(Boolean);
+    const words: string[] = [];
+    for (const segment of segments) {
+      const segmentWords = segment.split(/\s+/).filter(Boolean);
+      segmentWords.forEach((word, index) => words.push(index === segmentWords.length - 1 ? `${word}\n` : word));
+    }
+    /* AGENT_2_BİTİŞ */
     let size = Math.max(10, Math.min(48, initialSize));
     let lines = [text];
     while (size >= 8) {
       if (measure) measure.font = `700 ${size}px Arial Narrow, Arial, sans-serif`;
       const next: string[] = [];
       let line = '';
-      for (const word of words) {
+      /* AGENT_2_BAŞLANGIÇ */
+      for (const rawWord of words) {
+        const word = rawWord.endsWith('\n') ? rawWord.slice(0, -1) : rawWord;
         const candidate = line ? `${line} ${word}` : word;
         if (measure && line && measure.measureText(candidate).width > width * 0.92) { next.push(line); line = word; }
         else line = candidate;
+        if (rawWord.endsWith('\n')) { next.push(line); line = ''; }
       }
+      /* AGENT_2_BİTİŞ */
       if (line) next.push(line);
       lines = next.length ? next : [text];
       const lineHeight = size * 1.06;
@@ -323,16 +408,20 @@ function renderState(state: OverlayState) {
     const boxWidth = Math.max(24, Math.min(rect.width * 0.78, (box.width + padX * 2) * scaleX));
     const boxHeight = Math.max(18, Math.min(rect.height * 0.22, (box.height + padY * 2) * scaleY));
     const fit = fitText(box.text, boxWidth - 8, boxHeight - 4, sourceLineHeight * scaleY * 0.86);
-    const unclampedLeft = rect.left + (box.left - padX) * scaleX;
-    const unclampedTop = rect.top + (box.top - padY) * scaleY;
+    /* AGENT_GOREV3_BAŞLANGIÇ */
+    const unclampedLeft = rect.left + scrollX + (box.left - padX) * scaleX;
+    const unclampedTop = rect.top + scrollY + (box.top - padY) * scaleY;
+    const documentRight = rect.right + scrollX;
+    const documentBottom = rect.bottom + scrollY;
     Object.assign(region.style, {
-      left: `${Math.max(rect.left, Math.min(unclampedLeft, rect.right - boxWidth))}px`,
-      top: `${Math.max(rect.top, Math.min(unclampedTop, rect.bottom - boxHeight))}px`,
+      left: `${Math.max(rect.left + scrollX, Math.min(unclampedLeft, documentRight - boxWidth))}px`,
+      top: `${Math.max(rect.top + scrollY, Math.min(unclampedTop, documentBottom - boxHeight))}px`,
       width: `${boxWidth}px`,
       height: `${boxHeight}px`,
       fontSize: `${fit.size}px`,
       lineHeight: `${fit.lineHeight}px`
     });
+    /* AGENT_GOREV3_BİTİŞ */
     region.textContent = fit.text;
     state.node.append(region);
   }
@@ -350,6 +439,22 @@ function scheduleRender() {
   frame = requestAnimationFrame(render);
 }
 
+function filterEnglishOcrBoxes(boxes: OcrBox[]): OcrBox[] {
+  return boxes.filter((box) => {
+    const text = String(box.text ?? '').trim();
+    const confidence = Number(box.confidence);
+    const isAsciiWord = /^[A-Za-z0-9\s.,!?;:'"()\-]+$/.test(text);
+    const isLongEnough = text.length >= 2;
+    const hasReliableConfidence = Number.isFinite(confidence) && confidence >= 50;
+    const hasRepeatedLetter = /(.)\1\1\1/i.test(text);
+    if (!isAsciiWord || !isLongEnough || !hasReliableConfidence || hasRepeatedLetter) {
+      console.warn('[MangaTR OCR FILTERED]', text, confidence);
+      return false;
+    }
+    return true;
+  });
+}
+
 async function processImage(image: HTMLImageElement, state: OverlayState) {
   if (state.busy || !enabled) return;
   state.queued = false;
@@ -357,12 +462,18 @@ async function processImage(image: HTMLImageElement, state: OverlayState) {
   try {
     status(`Yerel OCR çalışıyor: ${overlays.size - ocrQueue.length} / ${overlays.size} görsel`);
     const key = imageCacheKey(image);
-    const rawBoxes = ocrCache.get(key) ?? await recognizeImageLocally(image);
-    ocrCache.set(key, rawBoxes);
+    /* AGENT_GOREV5_BAŞLANGIÇ */
+    const cached = getCachedOcr(key);
+    const rawBoxes = filterEnglishOcrBoxes(cached ?? await recognizeImageLocally(image));
+    if (!cached) setCachedOcr(key, rawBoxes);
+    /* AGENT_GOREV5_BİTİŞ */
     if (!rawBoxes.length) throw new Error('Bu görselde güvenilir İngilizce metin bulunamadı.');
     status(`DeepL çeviriyor: ${rawBoxes.length} metin bölgesi`);
     state.boxes = await translateBoxes(rawBoxes);
     renderState(state);
+    /* AGENT_GOREV5_BAŞLANGIÇ */
+    state.image.dataset.mangaTrOverlayDone = '1';
+    /* AGENT_GOREV5_BİTİŞ */
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     console.error('OCR/çeviri başarısız:', error);
@@ -370,29 +481,42 @@ async function processImage(image: HTMLImageElement, state: OverlayState) {
   } finally {
     state.busy = false;
     state.processed = true;
-    queueRunning = false;
+    activeOcrCount -= 1;
+    queueRunning = activeOcrCount > 0;
     pumpQueue();
   }
 }
 
 function pumpQueue() {
-  if (!enabled || queueRunning) return;
-  const next = ocrQueue.shift();
-  if (next) {
+  if (!enabled) return;
+  while (activeOcrCount < MAX_CONCURRENT_OCR) {
+    const next = ocrQueue.shift();
+    if (!next) break;
+    activeOcrCount += 1;
     queueRunning = true;
     void processImage(next.image, next);
   }
 }
+}
+/* AGENT_GOREV1_BİTİŞ */
+
+function queueImage(image: HTMLImageElement) {
+  if (captureScrollLock) return;
+  const state = overlays.get(image);
+  /* AGENT_GOREV5_BAŞLANGIÇ */
+  if (!state || !isMangaImage(image) || !isNearViewport(image) || state.busy || state.queued || state.processed || image.dataset.mangaTrOverlayDone === '1') return;
+  /* AGENT_GOREV5_BİTİŞ */
+  state.queued = true;
+  ocrQueue.push(state);
+  pumpQueue();
+}
 
 function queueVisibleImages() {
-  if (captureScrollLock) return;
-  for (const state of overlays.values()) {
-    if (!state.busy && !state.queued && !state.processed && isNearViewport(state.image)) {
-      state.queued = true;
-      ocrQueue.push(state);
-    }
-  }
-  pumpQueue();
+  for (const state of overlays.values()) if (isNearViewport(state.image)) queueImage(state.image);
+}
+
+function observeImage(image: HTMLImageElement) {
+  ocrObserver?.observe(image);
 }
 
 function ensureOverlays() {
@@ -403,6 +527,7 @@ function ensureOverlays() {
     const state: OverlayState = { image, boxes: [], node, busy: false, queued: false, processed: false };
     overlays.set(image, state);
     container.append(node);
+    observeImage(image);
   }
   queueVisibleImages();
   for (const [image, state] of overlays) {
@@ -416,6 +541,9 @@ function startPageTranslation() {
   clearOverlays();
   enabled = true;
   addStyle();
+  ocrObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) if (entry.isIntersecting) queueImage(entry.target as HTMLImageElement);
+  }, { rootMargin: '200px', threshold: 0.1 });
   ensureOverlays();
   controller = new AbortController();
   window.addEventListener('resize', scheduleRender, { passive: true, signal: controller.signal });
@@ -434,13 +562,20 @@ function clearOverlays() {
   controller = null;
   pageObserver?.disconnect();
   pageObserver = null;
+  ocrObserver?.disconnect();
+  ocrObserver = null;
   ocrQueue.length = 0;
+  activeOcrCount = 0;
   queueRunning = false;
   captureScrollLock = false;
   for (const pending of pendingOcr.values()) pending.reject(new Error('OCR iptal edildi.'));
   pendingOcr.clear();
   document.querySelector<HTMLIFrameElement>('iframe[src$="/ocr-frame.html"]')?.remove();
   ocrFramePromise = null;
+  /* AGENT_GOREV5_BAŞLANGIÇ: overlay kapatınca DOM işaretini temizle; OCR önbelleği (MangaTrOcrCache) bilerek korunur —
+     kullanıcı çeviriyi tekrar açarsa cache hit ile OCR'sız hızlı render olur */
+  for (const image of overlays.keys()) delete image.dataset.mangaTrOverlayDone;
+  /* AGENT_GOREV5_BİTİŞ */
   for (const state of overlays.values()) state.node.remove();
   overlays.clear();
   document.getElementById(ROOT_ID)?.remove();
@@ -451,4 +586,3 @@ api.runtime.onMessage.addListener((message: ExtensionMessage) => {
   if (message.type === 'CLEAR_OVERLAY') clearOverlays();
 });
 }
-
