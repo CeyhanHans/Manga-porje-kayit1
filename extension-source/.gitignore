@@ -1,0 +1,8 @@
+# DUZELTME_GOREV3: build zinciri ara/çıktı dosyaları ve 10,9 MB'lık OCR dil varlığı
+# git'e girmez (GÖREV6 raporu kararı). eng.traineddata.gz yerelde restore edilir;
+# bkz. README "Geliştirme zinciri ve reload protokolü".
+node_modules/
+build/
+dist/
+outputs/
+assets/ocr/*.gz
