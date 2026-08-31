@@ -23,7 +23,11 @@ async function translateTexts(texts: string[], explicitKey?: string) {
     headers: { Authorization: `DeepL-Auth-Key ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: cleanTexts, source_lang: 'EN', target_lang: 'TR' }),
   });
-  if (!response.ok) throw new Error(`DeepL çeviri isteği başarısız (${response.status}).`);
+  if (!response.ok) {
+    if (response.status === 403) throw new Error('DeepL API anahtarınız geçersiz veya kotanız dolmuş olabilir.');
+    if (response.status === 456) throw new Error('DeepL aylık karakter kotanız doldu. Yeni ay başında sıfırlanır.');
+    throw new Error(`DeepL çeviri isteği başarısız (${response.status}).`);
+  }
   const payload = await response.json();
   const translations = Array.isArray(payload?.translations) ? payload.translations.map((item: any) => String(item?.text ?? '')) : [];
   if (translations.length !== cleanTexts.length) throw new Error('DeepL eksik çeviri sonucu döndürdü.');

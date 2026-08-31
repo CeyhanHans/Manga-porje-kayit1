@@ -497,7 +497,9 @@ function pumpQueue() {
     void processImage(next.image, next);
   }
 }
-}
+/* AGENT_GOREV6_BAŞLANGIÇ: build tamiri — namespace burada erken kapatılmıştı; kalan fonksiyonlar
+   (queueImage...clearOverlays, onMessage) namespace dışında kalıp dosya sonunda yetim '}' üretiyordu
+   (tsc TS1128). Kapanış kaldırıldı; namespace artık dosya sonundaki '}' ile kapanıyor. Mantık değişikliği yok. */
 /* AGENT_GOREV1_BİTİŞ */
 
 function queueImage(image: HTMLImageElement) {

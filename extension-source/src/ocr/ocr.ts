@@ -1,4 +1,4 @@
-import { createWorker, PSM } from 'tesseract.js';
+import { createWorker, OEM, PSM } from 'tesseract.js';
 import { cleanAndGroupOcrLines, type RawOcrLine } from '../shared/ocr-cleanup.js';
 
 declare const chrome: any;
@@ -22,11 +22,15 @@ async function getWorker() {
       workerBlobURL: false,
       logger: () => undefined
     }).then(async (worker) => {
+      /* AGENT_GOREV9_BAŞLANGIÇ */
       await worker.setParameters({
-        tessedit_pageseg_mode: PSM.SPARSE_TEXT,
-        preserve_interword_spaces: '1',
+        tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+        tessedit_ocr_engine_mode: OEM.LSTM_ONLY,
+        preserve_interword_spaces: '0',
+        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?'-:;() ",
         user_defined_dpi: '300',
       });
+      /* AGENT_GOREV9_BİTİŞ */
       return worker;
     });
   }
